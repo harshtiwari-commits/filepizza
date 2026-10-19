@@ -12,7 +12,10 @@ import ProgressBar from './ProgressBar'
 import TitleText from './TitleText'
 import ReturnHome from './ReturnHome'
 import { pluralize } from '../utils/pluralize'
+import { previewBlockedReason } from '../utils/preview'
 import { ErrorMessage } from './ErrorMessage'
+import PreviewButton from './PreviewButton'
+import PreviewModal from './PreviewModal'
 
 interface FileInfo {
   fileName: string
@@ -142,9 +145,13 @@ export function DownloadInProgress({
 export function ReadyToDownload({
   filesInfo,
   onStart,
+  onPreview,
+  isPreviewing,
 }: {
   filesInfo: FileInfo[]
   onStart: () => void
+  onPreview: (file: FileInfo) => void
+  isPreviewing: boolean
 }): JSX.Element {
   return (
     <>
@@ -153,8 +160,17 @@ export function ReadyToDownload({
         {pluralize(filesInfo.length, 'file', 'files')}.
       </TitleText>
       <div className="flex flex-col space-y-5 w-full">
-        <UploadFileList files={filesInfo} />
-        <DownloadButton onClick={onStart} />
+        <UploadFileList
+          files={filesInfo}
+          renderAction={(i) => (
+            <PreviewButton
+              onClick={() => onPreview(filesInfo[i])}
+              disabled={isPreviewing}
+              title={previewBlockedReason(filesInfo[i]) ?? undefined}
+            />
+          )}
+        />
+        <DownloadButton onClick={onStart} disabled={isPreviewing} />
       </div>
     </>
   )
@@ -217,9 +233,15 @@ export default function Downloader({
     submitPassword,
     startDownload,
     stopDownload,
+    startPreview,
+    cancelPreview,
+    isPreviewing,
+    previewBytes,
     totalSize,
     bytesDownloaded,
   } = useDownloader(uploaderPeerID)
+
+  const [previewingFile, setPreviewingFile] = useState<FileInfo | null>(null)
 
   if (isDone && filesInfo) {
     return (
@@ -258,7 +280,26 @@ export default function Downloader({
   }
 
   if (filesInfo) {
-    return <ReadyToDownload filesInfo={filesInfo} onStart={startDownload} />
+    return (
+      <>
+        <ReadyToDownload
+          filesInfo={filesInfo}
+          onStart={startDownload}
+          onPreview={setPreviewingFile}
+          isPreviewing={isPreviewing}
+        />
+        {previewingFile && (
+          <PreviewModal
+            file={previewingFile}
+            previewBytes={previewBytes}
+            startPreview={startPreview}
+            cancelPreview={cancelPreview}
+            onClose={() => setPreviewingFile(null)}
+            onDownload={startDownload}
+          />
+        )}
+      </>
+    )
   }
 
   if (!isConnected) {
