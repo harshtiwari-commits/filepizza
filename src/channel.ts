@@ -284,17 +284,26 @@ export class RedisChannelRepo implements ChannelRepo {
   }
 }
 
-let _channelRepo: ChannelRepo | null = null
+// In `next dev`, Next.js compiles each route as a separate module instance, so a
+// plain module-level variable gives /api/create and /download/[...slug] their own
+// separate channel stores: the uploader writes to one and the downloader reads an
+// empty one, so every recipient link 404s. Hanging the singleton off globalThis
+// keeps a single instance per process. Setting REDIS_URL also avoids this, since
+// Redis is external state.
+declare global {
+  // eslint-disable-next-line no-var
+  var __filepizzaChannelRepo: ChannelRepo | undefined
+}
 
 export function getOrCreateChannelRepo(): ChannelRepo {
-  if (!_channelRepo) {
-    if (process.env.REDIS_URL) {
-      _channelRepo = new RedisChannelRepo()
-      console.log('[ChannelRepo] Using Redis storage')
-    } else {
-      _channelRepo = new MemoryChannelRepo()
-      console.log('[ChannelRepo] Using in-memory storage')
-    }
+  if (!globalThis.__filepizzaChannelRepo) {
+    const useRedis = Boolean(process.env.REDIS_URL)
+    globalThis.__filepizzaChannelRepo = useRedis
+      ? new RedisChannelRepo()
+      : new MemoryChannelRepo()
+    console.log(
+      `[ChannelRepo] Using ${useRedis ? 'Redis' : 'in-memory'} storage`,
+    )
   }
-  return _channelRepo
+  return globalThis.__filepizzaChannelRepo
 }
