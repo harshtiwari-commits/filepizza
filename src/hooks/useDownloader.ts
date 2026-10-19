@@ -8,6 +8,11 @@ import {
   streamDownloadMultipleFiles,
 } from '../utils/download'
 import {
+  PREVIEW_MAX_BYTES,
+  previewBlockedReason,
+  sniffImageMimeType,
+} from '../utils/preview'
+import {
   browserName,
   browserVersion,
   osName,
@@ -23,6 +28,8 @@ const cleanErrorMessage = (errorMessage: string): string =>
 
 const getZipFilename = (): string => `filepizza-download-${Date.now()}.zip`
 
+export type PreviewResult = { blob: Blob; mimeType: string }
+
 export function useDownloader(uploaderPeerID: string): {
   filesInfo: Array<{ fileName: string; size: number; type: string }> | null
   isConnected: boolean
@@ -33,6 +40,10 @@ export function useDownloader(uploaderPeerID: string): {
   submitPassword: (password: string) => void
   startDownload: () => void
   stopDownload: () => void
+  startPreview: (fileName: string) => Promise<PreviewResult>
+  cancelPreview: () => void
+  isPreviewing: boolean
+  previewBytes: number
   totalSize: number
   bytesDownloaded: number
 } {
@@ -54,6 +65,9 @@ export function useDownloader(uploaderPeerID: string): {
   const [isDone, setDone] = useState(false)
   const [bytesDownloaded, setBytesDownloaded] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [isPreviewing, setIsPreviewing] = useState(false)
+  const [previewBytes, setPreviewBytes] = useState(0)
+  const abortPreviewRef = useRef<((message: string) => void) | null>(null)
 
   useEffect(() => {
     if (!peer) return
@@ -109,6 +123,9 @@ export function useDownloader(uploaderPeerID: string): {
 
     const handleClose = () => {
       console.log('[Downloader] connection closed')
+      abortPreviewRef.current?.(
+        'The uploader disconnected before the preview finished.',
+      )
       setRotating(false)
       setDataConnection(null)
       setIsConnected(false)
@@ -117,6 +134,9 @@ export function useDownloader(uploaderPeerID: string): {
 
     const handleError = (err: Error) => {
       console.error('[Downloader] connection error:', err)
+      abortPreviewRef.current?.(
+        'The connection to the uploader failed before the preview finished.',
+      )
       setErrorMessage(cleanErrorMessage(err.message))
       if (conn.open) conn.close()
       else handleClose()
@@ -159,7 +179,9 @@ export function useDownloader(uploaderPeerID: string): {
   )
 
   const startDownload = useCallback(() => {
-    if (!filesInfo || !dataConnection) return
+    // The uploader only services one transfer at a time, so never overlap a
+    // download with an in-flight preview.
+    if (!filesInfo || !dataConnection || isPreviewing) return
     console.log('[Downloader] starting download')
     setIsDownloading(true)
 
@@ -265,7 +287,123 @@ export function useDownloader(uploaderPeerID: string): {
       .catch((err) => console.error('[Downloader] download error:', err))
 
     startNextFileOrFinish()
-  }, [dataConnection, filesInfo])
+  }, [dataConnection, filesInfo, isPreviewing])
+
+  const startPreview = useCallback(
+    async (fileName: string): Promise<PreviewResult> => {
+      if (!dataConnection) {
+        throw new Error('Not connected to the uploader.')
+      }
+      if (isDownloading) {
+        throw new Error('A download is already in progress.')
+      }
+      if (isPreviewing) {
+        throw new Error('A preview is already in progress.')
+      }
+      if (!filesInfo) {
+        throw new Error('No file information received from the uploader yet.')
+      }
+
+      const info = filesInfo.find((f) => f.fileName === fileName)
+      if (!info) {
+        throw new Error(`Unknown file: ${fileName}`)
+      }
+
+      const blockedReason = previewBlockedReason(info)
+      if (blockedReason) {
+        throw new Error(blockedReason)
+      }
+
+      setIsPreviewing(true)
+      setPreviewBytes(0)
+
+      return new Promise<PreviewResult>((resolve, reject) => {
+        const chunks: Uint8Array[] = []
+        let received = 0
+        let mimeType = ''
+        let settled = false
+
+        const settle = (finish: () => void): void => {
+          if (settled) return
+          settled = true
+          processChunk.current = null
+          abortPreviewRef.current = null
+          setIsPreviewing(false)
+          setPreviewBytes(0)
+          finish()
+        }
+
+        const abort = (message: string): void => {
+          try {
+            if (dataConnection.open) {
+              dataConnection.send({
+                type: MessageType.Pause,
+              } as z.infer<typeof Message>)
+            }
+          } catch (err) {
+            console.error('[Downloader] failed to send Pause:', err)
+          }
+          settle(() => reject(new Error(message)))
+        }
+
+        abortPreviewRef.current = abort
+
+        processChunk.current = (message: z.infer<typeof ChunkMessage>) => {
+          if (message.fileName !== fileName) return
+
+          const bytes = new Uint8Array(message.bytes as ArrayBuffer)
+
+          // Sniff the first chunk so an unsupported file is rejected before we
+          // pull the whole thing down.
+          if (mimeType === '' && bytes.byteLength > 0) {
+            const sniffed = sniffImageMimeType(bytes)
+            if (!sniffed) {
+              abort('This file type cannot be previewed.')
+              return
+            }
+            mimeType = sniffed
+          }
+
+          received += bytes.byteLength
+          if (received > PREVIEW_MAX_BYTES) {
+            abort('This file is too large to preview.')
+            return
+          }
+          chunks.push(bytes)
+          setPreviewBytes(received)
+
+          dataConnection.send({
+            type: MessageType.ChunkAck,
+            fileName: message.fileName,
+            offset: message.offset,
+            bytesReceived: bytes.byteLength,
+          } as z.infer<typeof Message>)
+
+          if (message.final) {
+            if (mimeType === '') {
+              abort('This file type cannot be previewed.')
+              return
+            }
+            settle(() =>
+              resolve({ blob: new Blob(chunks, { type: mimeType }), mimeType }),
+            )
+          }
+        }
+
+        dataConnection.send({
+          type: MessageType.Start,
+          fileName,
+          offset: 0,
+        } as z.infer<typeof Message>)
+      })
+    },
+    [dataConnection, filesInfo, isDownloading, isPreviewing],
+  )
+
+  const cancelPreview = useCallback(() => {
+    // Safe to call at any time: the ref is null unless a preview is in flight.
+    abortPreviewRef.current?.('Preview cancelled.')
+  }, [])
 
   const stopDownload = useCallback(() => {
     // TODO(@kern): Continue here with stop / pause logic
@@ -295,6 +433,10 @@ export function useDownloader(uploaderPeerID: string): {
     submitPassword,
     startDownload,
     stopDownload,
+    startPreview,
+    cancelPreview,
+    isPreviewing,
+    previewBytes,
     totalSize: filesInfo?.reduce((acc, info) => acc + info.size, 0) ?? 0,
     bytesDownloaded,
   }
