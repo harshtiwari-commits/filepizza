@@ -9,9 +9,11 @@ type UploadedFileLike = {
 export default function UploadFileList({
   files,
   onRemove,
+  renderAction,
 }: {
   files: UploadedFileLike[]
   onRemove?: (index: number) => void
+  renderAction?: (index: number) => React.ReactNode
 }): JSX.Element {
   const items = files.map((f: UploadedFileLike, i: number) => (
     <div
@@ -24,6 +26,7 @@ export default function UploadFileList({
         </p>
         <div className="flex items-center">
           <TypeBadge type={f.type} />
+          {renderAction?.(i)}
           {onRemove && (
             <button
               onClick={() => onRemove?.(i)}
