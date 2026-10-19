@@ -40,9 +40,15 @@ describe('Downloader subcomponents', () => {
 
   it('ReadyToDownload shows start button', () => {
     const { getByText } = render(
-      <ReadyToDownload filesInfo={files} onStart={() => {}} />,
+      <ReadyToDownload
+        filesInfo={files}
+        onStart={() => {}}
+        onPreview={() => {}}
+        isPreviewing={false}
+      />,
     )
     expect(getByText('Download')).toBeInTheDocument()
+    expect(getByText('Preview')).toBeInTheDocument()
   })
 
   it('PasswordEntry submits value', () => {
